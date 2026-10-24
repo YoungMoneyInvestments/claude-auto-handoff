@@ -50,7 +50,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 
 | Setting | Default | What it does |
 |---|---|---|
-| `threshold` | `240000` | Context tokens that trigger a handoff. Sized for the 1M window (a 200k-window model auto-compacts near 167k, before this fires): it leaves room for the brief and the turn in flight. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and the panel tells you where the line actually is |
+| `threshold` | `300000` | Context tokens that trigger a handoff. Sized for the 1M window (a 200k-window model auto-compacts near 167k, before this fires): it leaves room for the brief and the turn in flight. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and the panel tells you where the line actually is |
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | Your copy of the sections Haiku writes |
 | `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | Your copy of what the fresh session is told to do |
@@ -59,7 +59,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 
 Environment variables:
 
-- `AUTO_HANDOFF_TOKENS=60000` overrides the threshold for one run, so you can watch a handoff without filling 240k first. It stays set in that shell after the test. Seeded sessions start near 45k, so a value under about 85k leaves them less than 40k of room: the mod then hands off at start + 40k instead and the panel shows `threshold 60k (AUTO_HANDOFF_TOKENS) leaves 15k ...` so you know the override is still live.
+- `AUTO_HANDOFF_TOKENS=60000` overrides the threshold for one run, so you can watch a handoff without filling 300k first. It stays set in that shell after the test. Seeded sessions start near 45k, so a value under about 85k leaves them less than 40k of room: the mod then hands off at start + 40k instead and the panel shows `threshold 60k (AUTO_HANDOFF_TOKENS) leaves 15k ...` so you know the override is still live.
 - `AUTO_HANDOFF_DISABLE=1` turns the mod off for one session, viewer server included.
 - `DISABLE_AUTO_COMPACT` also turns it off. When something else manages the context limit, such as a wrapper that pipes the session, `/clear` would break that pipe. The viewer server still runs there.
 

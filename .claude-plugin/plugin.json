@@ -13,7 +13,7 @@
       "type": "number",
       "title": "Handoff threshold (tokens)",
       "description": "Context size that triggers a handoff. AUTO_HANDOFF_TOKENS overrides it for a test run. A seeded session hands off no sooner than 40k past its starting size; the panel above the prompt says so when this is set lower.",
-      "default": 240000
+      "default": 300000
     },
     "maxConsecutiveHandoffs": {
       "type": "number",
