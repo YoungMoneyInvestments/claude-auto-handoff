@@ -188,7 +188,7 @@ describe('auto-handoff', () => {
   })
 
   test('at the threshold: brief to disk, /clear, then seed the new session', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000 })
+    const calls = engine(on, { tokens: 255_000 })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     expect(calls.completes).toBe(1)
@@ -196,7 +196,7 @@ describe('auto-handoff', () => {
     expect(calls.written['/home/test/.claude/state/auto-handoff/old-session.md']).toContain('Finish the parser refactor')
     // The log is how a failed handoff gets diagnosed: it must name the threshold and the brief.
     const log = calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? ''
-    expect(log).toContain('threshold session=old-session tokens=305000')
+    expect(log).toContain('threshold session=old-session tokens=255000')
     expect(log).toContain('brief written /home/test/.claude/state/auto-handoff/old-session.md')
     expect(calls.cleared).toBe(1)
 
@@ -210,7 +210,7 @@ describe('auto-handoff', () => {
   })
 
   test('fires once per session', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000 })
+    const calls = engine(on, { tokens: 255_000 })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     await $.turn.complete(TURN)
@@ -227,7 +227,7 @@ describe('auto-handoff', () => {
 
   for (const name of ['AUTO_HANDOFF_DISABLE', 'DISABLE_AUTO_COMPACT']) {
     test(`kill switch: ${name} set means no brief and no clear`, async ($, on) => {
-      const calls = engine(on, { tokens: 330_000, env: { [name]: '1' } })
+      const calls = engine(on, { tokens: 300_000, env: { [name]: '1' } })
       await $.turn.complete(TURN)
       await settle(() => false)
       expect(calls.completes).toBe(0)
@@ -236,14 +236,14 @@ describe('auto-handoff', () => {
   }
 
   test('subagent turns are ignored', async ($, on) => {
-    const calls = engine(on, { tokens: 330_000 })
+    const calls = engine(on, { tokens: 300_000 })
     await $.turn.complete({ ...TURN, agentId: 'sub-1' })
     await settle(() => false)
     expect(calls.completes).toBe(0)
   })
 
   test('a failed Haiku brief falls back to the facts and still hands off', async ($, on) => {
-    const calls = engine(on, { tokens: 330_000, brief: null, messages: [msg('assistant', 'done', [edit('/repo/src/a.ts')])] })
+    const calls = engine(on, { tokens: 300_000, brief: null, messages: [msg('assistant', 'done', [edit('/repo/src/a.ts')])] })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
@@ -253,7 +253,7 @@ describe('auto-handoff', () => {
   })
 
   test('a Haiku reply with no brief sections is replaced by the facts', async ($, on) => {
-    const calls = engine(on, { tokens: 330_000, brief: 'Sure, I can help with that parser refactor!' })
+    const calls = engine(on, { tokens: 300_000, brief: 'Sure, I can help with that parser refactor!' })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
@@ -262,7 +262,7 @@ describe('auto-handoff', () => {
   })
 
   test('without sh the server cannot launch, and the link is the local file', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000, noSh: true })
+    const calls = engine(on, { tokens: 255_000, noSh: true })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     expect(calls.written['/home/test/.claude/state/auto-handoff/pages/old-session.html']).toBeDefined()
@@ -273,7 +273,7 @@ describe('auto-handoff', () => {
   })
 
   test('a blank viewer setting means no server, and the link is the local file', { options: { viewer: '' } }, async ($, on) => {
-    const calls = engine(on, { tokens: 305_000 })
+    const calls = engine(on, { tokens: 255_000 })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     await $.classic.SessionStart({ source: 'clear' })
@@ -296,7 +296,7 @@ describe('auto-handoff', () => {
   })
 
   test('the brief opens with the handoff instructions', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000 })
+    const calls = engine(on, { tokens: 255_000 })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const brief = parseBrief(calls.written['/home/test/.claude/state/auto-handoff/old-session.md'] ?? '').body
@@ -311,13 +311,13 @@ describe('auto-handoff', () => {
   })
 
   test('each brief gets a viewer page, and the chain links forward once the next session hands off', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000 })
+    const calls = engine(on, { tokens: 255_000 })
     const dir = '/home/test/.claude/state/auto-handoff'
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const first = parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header
     expect(first.chain).toBe('old-session')
-    expect(first.tokens).toBe('305000')
+    expect(first.tokens).toBe('255000')
     expect(first.depth).toBe('1')
     expect(calls.prompts[0]).toContain('**Handoff depth:** 1')
     expect(calls.written[`${dir}/pages/old-session.html`]).toContain('Session Context')
@@ -330,7 +330,7 @@ describe('auto-handoff', () => {
     // The seeded session's first turn sets its floor; the next one past the line hands off.
     calls.tokens = 47_000
     await $.turn.complete(TURN)
-    calls.tokens = 340_000
+    calls.tokens = 300_000
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 1)
     const second = parseBrief(calls.written[`${dir}/new-session-1.md`] ?? '').header
@@ -344,7 +344,7 @@ describe('auto-handoff', () => {
   test('a session seeded before a hot reload keeps its chain: lineage comes from the store', async ($, on) => {
     // Seen live: the reload wiped the in-memory lineage, and the next brief started a new chain.
     const dir = '/home/test/.claude/state/auto-handoff'
-    const calls = engine(on, { tokens: 305_000, store: { 'lineage:old-session': { from: 'earlier', chain: 'first' } } })
+    const calls = engine(on, { tokens: 255_000, store: { 'lineage:old-session': { from: 'earlier', chain: 'first' } } })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const header = parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header
@@ -357,7 +357,7 @@ describe('auto-handoff', () => {
 
   test('depth carries through the store across a hot reload', async ($, on) => {
     const dir = '/home/test/.claude/state/auto-handoff'
-    const calls = engine(on, { tokens: 305_000, store: { 'lineage:old-session': { from: 'earlier', chain: 'first', depth: 3 } } })
+    const calls = engine(on, { tokens: 255_000, store: { 'lineage:old-session': { from: 'earlier', chain: 'first', depth: 3 } } })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     expect(parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header.depth).toBe('3')
@@ -366,7 +366,7 @@ describe('auto-handoff', () => {
 
   test('an unanswered last request puts a PRIORITY directive in the instructions', async ($, on) => {
     const brief = '## Last Request from the User\n"Make the thresholds vars"\nStatus: Partially answered.\n\n## Next Step\nAdd userConfig.'
-    const calls = engine(on, { tokens: 305_000, brief })
+    const calls = engine(on, { tokens: 255_000, brief })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const written = calls.written['/home/test/.claude/state/auto-handoff/old-session.md'] ?? ''
@@ -377,7 +377,7 @@ describe('auto-handoff', () => {
 
   test('the brief template file sets the sections Haiku is asked for', async ($, on) => {
     const files = { '/home/test/.claude/auto-handoff/brief.md': 'Write only:\n\n## Mood\nHow it went.' }
-    const calls = engine(on, { tokens: 305_000, files, brief: '## Mood\nGood.' })
+    const calls = engine(on, { tokens: 255_000, files, brief: '## Mood\nGood.' })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     expect(calls.prompts[0]).toContain('## Mood\nHow it went.')
@@ -387,7 +387,7 @@ describe('auto-handoff', () => {
   })
 
   test('the instructions template file replaces the instructions', { options: { instructionsTemplate: '/custom/i.md' } }, async ($, on) => {
-    const calls = engine(on, { tokens: 305_000, files: { '/custom/i.md': '## Rules\nJust keep going.' } })
+    const calls = engine(on, { tokens: 255_000, files: { '/custom/i.md': '## Rules\nJust keep going.' } })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const brief = parseBrief(calls.written['/home/test/.claude/state/auto-handoff/old-session.md'] ?? '').body
@@ -395,11 +395,11 @@ describe('auto-handoff', () => {
   })
 
   test('without sh, the log is written through fs and keeps every line', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000, noSh: true })
+    const calls = engine(on, { tokens: 255_000, noSh: true })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const log = calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? ''
-    expect(log).toContain('threshold session=old-session tokens=305000')
+    expect(log).toContain('threshold session=old-session tokens=255000')
     expect(log).toContain('brief written /home/test/.claude/state/auto-handoff/old-session.md')
   })
 
@@ -429,7 +429,7 @@ describe('auto-handoff', () => {
       msg('user', 'fix #846 please'),
       msg('assistant', 'committing', [edit('/repo/mod.ts', 'Write'), bash("git commit -m 'feat: x'", '[main 47edd8e] feat(mods): auto-handoff\n 2 files changed')]),
     ]
-    const calls = engine(on, { tokens: 330_000, messages })
+    const calls = engine(on, { tokens: 300_000, messages })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
@@ -471,7 +471,7 @@ describe('auto-handoff', () => {
   test('a seeded session measures its floor at its first request, not at the end of its first turn', async ($, on) => {
     // Seen live: the seed turn read the whole mod and ran the suite three times, 47k to 129k,
     // with the pre-request check off; the floor landed at 129k and the next handoff moved out to 179k.
-    const calls = engine(on, { tokens: 305_000, stepUsage: true, toolChars: 1_100_000 })
+    const calls = engine(on, { tokens: 255_000, stepUsage: true, toolChars: 900_000 })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     await $.classic.SessionStart({ source: 'clear' })
@@ -480,9 +480,9 @@ describe('auto-handoff', () => {
     calls.tokens = 47_000 // the fresh session, brief and CLAUDE.md loaded
     await step($, 0) // the seed turn's first request: this is the floor
     expect(calls.steps).toBe(1)
-    await $.tool.call({ tool: 'Read', file_path: '/big.txt' }) // ~260k of reads land in the same turn
+    await $.tool.call({ tool: 'Read', file_path: '/big.txt' }) // ~225k of reads land in the same turn
     const chunks = await step($, 1)
-    expect(calls.steps).toBe(1) // stopped before the request that would carry 307k
+    expect(calls.steps).toBe(1) // stopped before the request that would carry 272k
     expect(chunks.some(c => c.kind === 'text' && c.text?.includes('auto-handoff'))).toBe(true)
     await settle(() => calls.cleared > 1)
     expect(calls.cleared).toBe(2)
@@ -569,7 +569,7 @@ describe('auto-handoff', () => {
   })
 
   test('no headroom warning at the default threshold', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000 })
+    const calls = engine(on, { tokens: 255_000 })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     await $.classic.SessionStart({ source: 'clear' })
@@ -664,7 +664,7 @@ describe('auto-handoff', () => {
 
   test('a stale briefing marker from a mid-handoff reload is retried', async ($, on) => {
     // Seen live: threshold fired, the mod reloaded 71 ms later, the marker stayed at 'briefing'.
-    const calls = engine(on, { tokens: 305_000, store: { 'fired:old-session': 'briefing' } })
+    const calls = engine(on, { tokens: 255_000, store: { 'fired:old-session': 'briefing' } })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     expect(calls.completes).toBe(1)
@@ -672,19 +672,19 @@ describe('auto-handoff', () => {
   })
 
   test('a clearing or seeded marker still means fired once', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000, store: { 'fired:old-session': 'seeded:new-session-1' } })
+    const calls = engine(on, { tokens: 255_000, store: { 'fired:old-session': 'seeded:new-session-1' } })
     await $.turn.complete(TURN)
     await settle(() => false)
     expect(calls.completes).toBe(0)
   })
 
   test('the panel above the prompt walks the handoff, then collapses', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000, stepUsage: true })
+    const calls = engine(on, { tokens: 255_000, stepUsage: true })
     expect(await band($)).toBe('')
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const clearing = await band($)
-    expect(clearing).toContain('auto-handoff · 305k / 300k')
+    expect(clearing).toContain('auto-handoff · 255k / 250k')
     expect(clearing).toContain('✓ brief written')
     expect(clearing).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] clearing/)
     await clock.advance(100)
@@ -698,7 +698,7 @@ describe('auto-handoff', () => {
     calls.tokens = 47_000
     await step($, 0) // the seed turn's first request
     const done = await band($)
-    expect(done).toContain('✓ handed off · 305k → 47k')
+    expect(done).toContain('✓ handed off · 255k → 47k')
     expect(done).toContain('[open brief](http://127.0.0.1:3846/old-sess)')
     expect(done).not.toContain('Dismiss')
     await clock.advance(10_000)
@@ -707,21 +707,21 @@ describe('auto-handoff', () => {
   })
 
   test('on the mobile app, which draws no band, the key moments go out as toasts', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000, stepUsage: true, surfaces: ['terminal', 'mobile'] })
+    const calls = engine(on, { tokens: 255_000, stepUsage: true, surfaces: ['terminal', 'mobile'] })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     await settle(() => calls.toasts.length > 0)
-    expect(calls.toasts).toEqual(['context 305k is past 300k: handing off'])
+    expect(calls.toasts).toEqual(['context 255k is past 250k: handing off'])
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
     calls.tokens = 47_000
     await step($, 0)
     await settle(() => calls.toasts.length > 1)
-    expect(calls.toasts).toEqual(['context 305k is past 300k: handing off', '↪ handed off · 305k → 47k'])
+    expect(calls.toasts).toEqual(['context 255k is past 250k: handing off', '↪ handed off · 255k → 47k'])
   })
 
   test('a facts-only brief stays on the panel until dismissed', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000, stepUsage: true, brief: null })
+    const calls = engine(on, { tokens: 255_000, stepUsage: true, brief: null })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     expect(await band($)).toContain('⚠ brief is facts only: the summary failed (empty-reply)')
@@ -788,7 +788,7 @@ describe('auto-handoff', () => {
   })
 
   test("the person's own /clear dismisses the panel when no handoff is under way", async ($, on) => {
-    const calls = engine(on, { tokens: 305_000, stepUsage: true, brief: null })
+    const calls = engine(on, { tokens: 255_000, stepUsage: true, brief: null })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     await $.classic.SessionStart({ source: 'clear' })
@@ -803,7 +803,7 @@ describe('auto-handoff', () => {
   })
 
   test('the handoff\'s own /clear keeps the panel', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000 })
+    const calls = engine(on, { tokens: 255_000 })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     await $.classic.SessionStart({ source: 'clear' })
@@ -812,14 +812,14 @@ describe('auto-handoff', () => {
   })
 
   test('the tool gate never blocks a session the mod will not hand off', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000, env: { AUTO_HANDOFF_DISABLE: 'x' }, toolChars: 220_000 })
+    const calls = engine(on, { tokens: 255_000, env: { AUTO_HANDOFF_DISABLE: 'x' }, toolChars: 220_000 })
     await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
     await $.tool.call({ tool: 'Read', file_path: '/b.txt' })
     expect(calls.ran).toBe(2)
   })
 
   test('the tool gate leaves subagents alone', async ($, on) => {
-    const calls = engine(on, { tokens: 305_000, toolChars: 220_000 })
+    const calls = engine(on, { tokens: 255_000, toolChars: 220_000 })
     await $.tool.call({ tool: 'Read', file_path: '/a.txt', agentId: 'sub-1' } as never)
     expect(calls.ran).toBe(1)
   })
