@@ -171,7 +171,7 @@ const figureValue = (k?: string, whole?: string) => k !== undefined ? Number(k) 
  * Marks every token figure in Haiku's text that the Handoff Numbers block does not hold, within
  * rounding to the nearest thousand. The template asks Haiku to copy those numbers; this makes it a
  * rule. Figures are marked, not removed, so the next session sees what was claimed and that it is
- * unchecked. With no numbers block, every figure is marked.
+ * unchecked. Only the first occurrence of each distinct figure is marked. With no numbers block, every figure is marked.
  */
 export function markUnverifiedFigures(text: string, f: Facts): { text: string; flagged: string[] } {
   const block = handoffNumbersBlock(f)
@@ -180,9 +180,13 @@ export function markUnverifiedFigures(text: string, f: Facts): { text: string; f
     ...[...block.matchAll(/\b\d{4,7}\b/g)].map(m => Number(m[0])),
   ]
   const flagged: string[] = []
+  // One mark per distinct figure: a brief that repeats "200k" ten times says it is unchecked once.
+  const seen = new Set<number>()
   const marked = text.replace(TOKEN_FIGURE, (match: string, k?: string, whole?: string) => {
     const value = figureValue(k, whole)
     if (allowed.some(a => Math.abs(a - value) < 1000)) return match
+    if (seen.has(value)) return match
+    seen.add(value)
     flagged.push(match)
     return `${match} [unverified: not in Handoff Numbers]`
   })

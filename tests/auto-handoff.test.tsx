@@ -911,6 +911,14 @@ describe('markUnverifiedFigures', () => {
     expect(r.text).not.toContain('45,141 tokens [unverified')
   })
 
+  test('marks the first occurrence of a repeated figure only', () => {
+    const r = markUnverifiedFigures('The 200k hook is gone. Why 200k? Because 200k is the old window; 300k is not.', facts)
+    expect(r.flagged).toEqual(['200k', '300k'])
+    expect(r.text.match(/\[unverified/g)).toHaveLength(2)
+    expect(r.text).toContain('The 200k [unverified: not in Handoff Numbers] hook')
+    expect(r.text).toContain('Why 200k? Because 200k is')
+  })
+
   test('rounding to the nearest thousand passes; issue numbers and years are not figures', () => {
     expect(markUnverifiedFigures('93.1k tokens, see #2 and PR 2026', facts).flagged).toEqual([])
   })
