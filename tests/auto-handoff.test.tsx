@@ -935,10 +935,10 @@ describe('modelThreshold', () => {
   const base = { filesModified: [], commits: [], issues: [] }
   test('each family gets its own handoff line', () => {
     expect(modelThreshold('claude-haiku-5-5', 250_000)).toEqual({ base: 95_000, source: 'Haiku model rule' })
-    expect(modelThreshold('claude-sonnet-5-5', 250_000)).toEqual({ base: 275_000, source: 'Sonnet model rule' })
-    expect(modelThreshold('claude-opus-5-5', 250_000)).toEqual({ base: 500_000, source: 'Opus model rule' })
-    expect(modelThreshold('claude-fable-5-1', 250_000)).toEqual({ base: 650_000, source: 'Fable model rule' })
-    expect(modelThreshold('gpt-6-astra', 250_000)).toEqual({ base: 250_000, source: 'GPT-6 (2x tier above 272k) model rule' })
+    expect(modelThreshold('claude-sonnet-5-5', 250_000)).toEqual({ base: 400_000, source: 'Sonnet model rule' })
+    expect(modelThreshold('claude-opus-5-5', 250_000)).toEqual({ base: 600_000, source: 'Opus model rule' })
+    expect(modelThreshold('claude-fable-5-1', 250_000)).toEqual({ base: 750_000, source: 'Fable model rule' })
+    expect(modelThreshold('gpt-6-astra', 250_000)).toEqual({ base: 260_000, source: 'GPT-6 (2x tier above 272k) model rule' })
   })
   test('an unknown model keeps the configured threshold', () => {
     expect(modelThreshold('test-model', 250_000)).toEqual({ base: 250_000, source: 'threshold in /config' })
@@ -969,7 +969,7 @@ describe('model-aware handoff line', () => {
   test('a chain past maxChainDepth is briefed by the session model and carries the prior brief', async ($, on) => {
     const priorPath = '/home/test/.claude/state/auto-handoff/prev.md'
     const calls = engine(on, {
-      tokens: 600_000,
+      tokens: 700_000,
       model: 'claude-opus-5-5',
       store: { 'lineage:old-session': { from: 'prev', chain: 'c1', depth: 3 } },
       files: { [priorPath]: '## Prior Brief\nDecision: use zod.' },

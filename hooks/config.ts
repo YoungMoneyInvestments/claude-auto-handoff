@@ -29,13 +29,14 @@ export const MIN_HEADROOM = 40_000
 const MODEL_THRESHOLDS: readonly (readonly [RegExp, number, string])[] = [
   // Haiku 5.5: 5x input, output and cache above 100k per request, so hand off before the tier.
   [/haiku/, 95_000, 'Haiku'],
-  [/sonnet/, 275_000, 'Sonnet'],
-  // Opus 5.5: 1M window at standard pricing; 250k is only a quarter of it.
-  [/opus/, 500_000, 'Opus'],
+  // Sonnet 5.5: flat-priced 1M window; 400k is 40% of it.
+  [/sonnet/, 400_000, 'Sonnet'],
+  // Opus 5.5: 1M window at standard pricing; 600k is 60% of it.
+  [/opus/, 600_000, 'Opus'],
   // Fable 5.1: built for long-horizon agentic work, 1M flat, cache reads at 2.5%.
-  [/fable/, 650_000, 'Fable'],
+  [/fable/, 750_000, 'Fable'],
   // GPT-6 Astra / 6.1 Sol: above 272k the whole request bills at 2x input and cache.
-  [/astra|gpt-6/, 250_000, 'GPT-6 (2x tier above 272k)'],
+  [/astra|gpt-6/, 260_000, 'GPT-6 (2x tier above 272k)'],
 ]
 
 /** The handoff line for a model id, or the configured threshold when the model is unknown. */
