@@ -1,11 +1,11 @@
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, Register, SessionMessage, Timer } from 'claude-code'
 import { assembleBrief, briefPrompt, extractFacts, isValidBrief, markUnverifiedFigures } from './brief.ts'
 import { chainOf, parseBrief, renderPage, viewerLink, withHeader } from './viewer.ts'
 import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
 import { isSpinning, panelTree } from './panel.tsx'
 import type { Line, Panel } from './panel.tsx'
-import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, expand, k, linkify, parseConfig, short } from './config.ts'
+import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, expand, k, linkify, modelThreshold, parseConfig, short } from './config.ts'
 import type { Config, TemplateKey } from './config.ts'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
@@ -194,6 +194,34 @@ async function storedLineage($: EngineInterface, sessionId: string): Promise<Lin
   }
 }
 
+// Who writes the judgment sections. Haiku normally; past maxChainDepth the session's own model,
+// because a 3.5k-token Haiku brief written from a fourth-generation chain is where the frontier
+// model's context gets replaced by the cheapest model's guess at what mattered.
+async function briefModel($: EngineInterface, depth: number | undefined): Promise<string> {
+  if (depth === undefined || depth < cfg.maxChainDepth) return 'haiku'
+  try {
+    return (await $.session.model()) || 'haiku'
+  } catch {
+    return 'haiku'
+  }
+}
+
+// The brief this (seeded) session started from, if it is still on disk. The seed message holds its
+// path; individual briefs are moved to the Trash by the closeout hook, so a miss is normal.
+const SEED_BRIEF = /Read the brief at (\S+?\.md)/
+const PRIOR_BRIEF_CHARS = 8_000
+async function priorBriefText($: EngineInterface, messages: readonly SessionMessage[]): Promise<string | undefined> {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role !== 'user' || !m.text.startsWith(SEED_PREFIX)) continue
+    const path = m.text.match(SEED_BRIEF)?.[1]
+    if (!path) continue
+    const text = await readText($, path)
+    if (text) return text.length > PRIOR_BRIEF_CHARS ? text.slice(0, PRIOR_BRIEF_CHARS) : text
+  }
+  return undefined
+}
+
 async function handoff($: EngineInterface, sessionId: string, tokens: number, threshold: number) {
   try {
     const own = sessionId === seededSession && lineage ? lineage : await storedLineage($, sessionId)
@@ -208,12 +236,18 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     // A session with no lineage starts its chain. One seeded before depth existed stays unknown.
     const depth = own ? own.depth : 1
     if (depth !== undefined) facts.depth = depth
+    // A long chain gets its brief from the session's own model, and the previous brief is carried
+    // forward so the next summary appends to the chain's state instead of re-deriving it.
+    const author = await briefModel($, depth)
+    facts.briefAuthor = author
+    const prior = await priorBriefText($, messages)
+    if (prior) await log($, `prior brief carried session=${sessionId} chars=${prior.length}`)
     const briefTemplate = await template($, 'briefTemplate')
     const result = await $.model.complete({
-      model: 'haiku',
+      model: author,
       system: 'You summarize coding sessions into precise handoff briefs.',
-      prompt: briefPrompt(messages, facts, briefTemplate),
-      maxTokens: 4_000,
+      prompt: briefPrompt(messages, facts, briefTemplate, prior),
+      maxTokens: author === 'haiku' ? 4_000 : 6_000,
       timeoutMs: 60_000,
     })
     // A failed, empty or sectionless reply falls back to the facts.
@@ -240,7 +274,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
     steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
     await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
-    await log($, `brief written ${briefPath} (${brief.length} chars); queueing /clear`)
+    await log($, `brief written ${briefPath} (${brief.length} chars, author=${author} depth=${depth}); queueing /clear`)
     $.command.run({ command: 'clear' }).catch(async (err: unknown) => {
       pending = undefined
       // fired stays 'clearing', so this session does not try again; it carries on as it is.
@@ -392,9 +426,18 @@ function showHandedOff($: EngineInterface, fresh: number) {
 
 // The configured threshold and where it came from. The env var wins so a test run needs no
 // /config change; it also outlives the test in that shell, which is why the headroom warning names it.
+// Otherwise the line is the model's: one number for every model was too early for Opus/Fable and
+// too late for Haiku's 5x tier (see modelThreshold).
 async function configured($: EngineInterface): Promise<{ base: number; source: string }> {
   const env = Number(await $.env.get('AUTO_HANDOFF_TOKENS'))
-  return env > 0 ? { base: env, source: 'AUTO_HANDOFF_TOKENS' } : { base: cfg.threshold, source: 'threshold in /config' }
+  if (env > 0) return { base: env, source: 'AUTO_HANDOFF_TOKENS' }
+  let model: string | undefined
+  try {
+    model = await $.session.model()
+  } catch {
+    model = undefined
+  }
+  return modelThreshold(model, cfg.threshold)
 }
 
 // A seeded session hands off no sooner than MIN_HEADROOM past its floor, whatever the threshold says.

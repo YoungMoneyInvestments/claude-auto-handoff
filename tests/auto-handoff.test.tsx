@@ -1,11 +1,12 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import type { On, SessionMessage } from 'claude-code'
-import { briefPrompt, extractFacts, factsBlock, hasUnansweredLastRequest, isValidBrief, markUnverifiedFigures } from '../hooks/brief.ts'
+import { briefPrompt, extractErrors, extractFacts, factsBlock, hasUnansweredLastRequest, isValidBrief, markUnverifiedFigures, renderTranscript } from '../hooks/brief.ts'
+import { modelThreshold } from '../hooks/config.ts'
 import { renderTemplate } from '../hooks/templates.ts'
 import { parseBrief } from '../hooks/viewer.ts'
 
-type Calls = { compacts: number; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; toasts: string[]; ran: number }
+type Calls = { compacts: number; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; models: string[]; toasts: string[]; ran: number }
 
 // The test runs sandboxed, with no file access, so these stand in for the files in templates/:
 // the same headings and switches, shorter prose.
@@ -56,8 +57,8 @@ const posix = (p: string) => p.replace(/^[A-Za-z]:/, '').replace(/\\/g, '/')
 const files = (written: Record<string, string>) => Object.keys(written).filter(p => !p.endsWith('/auto-handoff.log'))
 
 // The engine beneath the plugin: everything the mod calls, answered from memory.
-function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; noSh?: boolean }): Calls {
-  const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0 }
+function engine(on: On, opts: { tokens: number; model?: string; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; noSh?: boolean }): Calls {
+  const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], models: [], toasts: [], ran: 0 }
   let sessionId = 'old-session'
   let clears = 0
   mock.env(on, { HOME: '/home/test', ...(opts.env ?? {}) })
@@ -72,6 +73,7 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
   on('session.usage', async () => ({ value: { startedAt: 0, context: { tokens: calls.tokens, window: 200_000 }, rateLimits: [] } }))
   on('session.id', async () => ({ value: sessionId }))
   on('session.cwd', async () => ({ value: '/home/test/proj' }))
+  on('session.model', async () => ({ value: opts.model ?? 'test-model' }))
   on('fs.read', async (_$, e) => {
     const path = posix(e.path)
     const text = calls.written[path] ?? opts.files?.[path]
@@ -85,6 +87,7 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
   on('model.complete', async (_$, e) => {
     calls.completes++
     calls.prompts.push(e.prompt)
+    calls.models.push(String(e.model))
     return {
       value: opts.brief === null
         ? { isAnswered: false, reason: 'empty-reply', usage: USAGE }
@@ -925,5 +928,80 @@ describe('markUnverifiedFigures', () => {
 
   test('with no numbers block, any figure is marked', () => {
     expect(markUnverifiedFigures('at 120k', { filesModified: [], commits: [], issues: [] }).flagged).toEqual(['120k'])
+  })
+})
+
+describe('modelThreshold', () => {
+  const base = { filesModified: [], commits: [], issues: [] }
+  test('each family gets its own handoff line', () => {
+    expect(modelThreshold('claude-haiku-5-5', 250_000)).toEqual({ base: 95_000, source: 'Haiku model rule' })
+    expect(modelThreshold('claude-sonnet-5-5', 250_000)).toEqual({ base: 275_000, source: 'Sonnet model rule' })
+    expect(modelThreshold('claude-opus-5-5', 250_000)).toEqual({ base: 500_000, source: 'Opus model rule' })
+    expect(modelThreshold('claude-fable-5-1', 250_000)).toEqual({ base: 650_000, source: 'Fable model rule' })
+    expect(modelThreshold('gpt-6-astra', 250_000)).toEqual({ base: 250_000, source: 'GPT-6 (2x tier above 272k) model rule' })
+  })
+  test('an unknown model keeps the configured threshold', () => {
+    expect(modelThreshold('test-model', 250_000)).toEqual({ base: 250_000, source: 'threshold in /config' })
+    expect(modelThreshold(undefined, 180_000)).toEqual({ base: 180_000, source: 'threshold in /config' })
+  })
+  test('the line reaches the panel and the log', async ($, on) => {
+    const calls = engine(on, { tokens: 100_000, model: 'claude-haiku-5-5' })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    const log = calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? ''
+    expect(log).toContain('threshold=95000')
+  })
+})
+
+describe('model-aware handoff line', () => {
+  test('a Haiku session hands off at 100k, before its 5x tier', async ($, on) => {
+    const calls = engine(on, { tokens: 100_000, model: 'claude-haiku-5-5' })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
+  })
+  test('an Opus session does not hand off at 255k', async ($, on) => {
+    const calls = engine(on, { tokens: 255_000, model: 'claude-opus-5-5' })
+    await $.turn.complete(TURN)
+    await settle(() => false)
+    expect(calls.cleared).toBe(0)
+  })
+  test('a chain past maxChainDepth is briefed by the session model and carries the prior brief', async ($, on) => {
+    const priorPath = '/home/test/.claude/state/auto-handoff/prev.md'
+    const calls = engine(on, {
+      tokens: 600_000,
+      model: 'claude-opus-5-5',
+      store: { 'lineage:old-session': { from: 'prev', chain: 'c1', depth: 3 } },
+      files: { [priorPath]: '## Prior Brief\nDecision: use zod.' },
+      messages: [
+        { role: 'user', text: `[auto-handoff] ↪ Handoff from session prev. Read the brief at ${priorPath} and follow it.`, toolUses: [] },
+        ...BASIC,
+      ],
+    })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    expect(calls.models).toEqual(['claude-opus-5-5'])
+    expect(calls.prompts[0]).toContain('## Prior Brief (from the session this one continues)')
+    expect(calls.prompts[0]).toContain('Decision: use zod.')
+  })
+})
+
+describe('recent tool errors', () => {
+  const base = { filesModified: [], commits: [], issues: [] }
+  const failure = msg('assistant', 'that failed', [bash('npm test', "TypeError: cannot read 'id' of undefined\n  at parser.ts:42", true)])
+  test('extractErrors keeps the failing line and the command', () => {
+    const [e] = extractErrors([failure])
+    expect(e).toContain('[Bash] npm test')
+    expect(e).toContain('TypeError')
+  })
+  test('renderTranscript shows an error result the summarizer used to never see', () => {
+    const t = renderTranscript([failure])
+    expect(t).toContain('[tool Bash ERROR]')
+    expect(t).toContain('TypeError')
+  })
+  test('factsBlock carries the errors into the brief even without a summary', () => {
+    const b = factsBlock({ ...base, recentErrors: extractErrors([failure]) })
+    expect(b).toContain('## Recent Tool Errors')
+    expect(b).toContain('TypeError')
   })
 })

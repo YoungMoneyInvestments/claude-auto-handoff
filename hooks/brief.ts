@@ -30,6 +30,10 @@ export type Facts = {
   unattendedCount?: number
   /** Which handoff this is in its chain (1 for the first, 2 for the second, etc.). */
   depth?: number
+  /** Deterministic excerpts of the most recent failed tool calls, including their error text. */
+  recentErrors?: string[]
+  /** The model that wrote the judgment sections: `haiku`, or the session's own model past the chain depth. */
+  briefAuthor?: string
 }
 
 /** The user's own words, or undefined for a harness signal or a tool-result-only message. */
@@ -71,7 +75,32 @@ export function extractFacts(messages: readonly SessionMessage[], ignoreFiles?: 
       if (subject && !commits.includes(subject)) commits.push(subject)
     }
   }
-  return { filesModified: [...files].slice(-20), commits: commits.slice(-10), issues: [...issues].slice(-15), lastUserMessage }
+  return { filesModified: [...files].slice(-20), commits: commits.slice(-10), issues: [...issues].slice(-15), lastUserMessage, recentErrors: extractErrors(messages) }
+}
+
+// The last failed tool calls, with the error text abbreviated. The summarizer never sees tool
+// results (renderTranscript prints the input plus an ERROR flag), so the one thing a coding
+// session learned — why the command failed — used to be lost entirely. These are deterministic
+// and land in the brief even when the summary step fails.
+const MAX_ERRORS = 3
+const MAX_ERROR_CHARS = 220
+export function extractErrors(messages: readonly SessionMessage[], limit = MAX_ERRORS): string[] {
+  const out: string[] = []
+  for (const m of messages) {
+    for (const t of m.toolUses) {
+      if (!t.isError) continue
+      const input = t.tool === 'Bash'
+        ? String(t.input.command ?? '')
+        : String(t.input.file_path ?? t.input.notebook_path ?? JSON.stringify(t.input))
+      const text = String(t.text ?? '').replace(/\r/g, '').trim()
+      // Prefer the lines that name the failure; fall back to the head of the output.
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+      const failure = lines.find(l => /error|fail|cannot|could not|undefined|not found|exit code|traceback/i.test(l))
+      const excerpt = (failure ?? lines[0] ?? '(no output captured)').slice(0, MAX_ERROR_CHARS)
+      out.push(`[${t.tool}] ${input.replace(/\s+/g, ' ').trim().slice(0, 160)} → ${excerpt}`)
+    }
+  }
+  return out.slice(-limit)
 }
 
 /** The transcript as Haiku reads it. Harness signals are labelled so they are not taken for the user. */
@@ -79,7 +108,12 @@ export function renderTranscript(messages: readonly SessionMessage[]): string {
   const lines = messages.slice(-MAX_MESSAGES).map(m => {
     const role = m.role === 'user' && m.text.trim() && !userText(m) ? 'system signal (not the user)' : m.role
     const text = m.text.length > MAX_MSG_CHARS ? m.text.slice(0, MAX_MSG_CHARS) + ' [truncated]' : m.text
-    const tools = m.toolUses.map(t => `  [tool ${t.tool}${t.isError ? ' ERROR' : ''}] ${JSON.stringify(t.input).slice(0, 300)}`)
+    const tools = m.toolUses.map(t => {
+      const head = `  [tool ${t.tool}${t.isError ? ' ERROR' : ''}] ${JSON.stringify(t.input).slice(0, 300)}`
+      // A failed call's output is the most valuable 600 characters in the session; show it.
+      if (!t.isError || typeof t.text !== 'string' || !t.text.trim()) return head
+      return `${head}\n  [result] ${t.text.replace(/\s+/g, ' ').trim().slice(0, 600)}`
+    })
     return [`### ${role}`, text, ...tools].filter(Boolean).join('\n')
   })
   const joined = lines.join('\n\n')
@@ -99,6 +133,7 @@ function handoffNumbersBlock(f: Facts): string {
   if (f.threshold !== undefined) lines.push(`- **Threshold:** ${f.threshold} (${k(f.threshold)})${f.thresholdSource ? `, from ${f.thresholdSource}` : ''}`)
   if (f.seededSessionStartSize !== undefined) lines.push(`- **This session's starting size (seeded from a handoff):** ${f.seededSessionStartSize} (${k(f.seededSessionStartSize)})`)
   if (f.unattendedCount !== undefined) lines.push(`- **Handoffs in a row with no user message:** ${f.unattendedCount}`)
+  if (f.briefAuthor) lines.push(`- **Brief written by:** ${f.briefAuthor}`)
   return lines.length ? `## Handoff Numbers\n${lines.join('\n')}\n` : ''
 }
 
@@ -114,13 +149,20 @@ ${list(f.commits, 'None.')}
 
 ## GitHub Issues Mentioned
 ${f.issues.length ? f.issues.join(', ') : 'None.'}`
-  const all = [numbers, files].filter(Boolean).join('\n')
+  const errors = f.recentErrors?.length ? `## Recent Tool Errors (verbatim excerpt)
+${list(f.recentErrors, 'None.')}` : ''
+  const all = [numbers, files, errors].filter(Boolean).join('\n')
   return withLastMessage ? `${all}\n\n## Last Real User Message (verbatim)\n${f.lastUserMessage ?? 'None found.'}` : all
 }
 
-export function briefPrompt(messages: readonly SessionMessage[], facts: Facts, template: string): string {
-  // Data first, instructions last.
-  return `## Extracted Facts\n${factsBlock(facts)}\n\n## Conversation\n${renderTranscript(messages)}\n\n---\n\n${template.trim()}`
+export function briefPrompt(messages: readonly SessionMessage[], facts: Facts, template: string, priorBrief?: string): string {
+  // Data first, instructions last. A chained handoff gets the previous brief too: without it the
+  // next summary re-derives the chain's state from prose alone (the seed tells the session not to
+  // restate the brief, and the brief arrives as a tool result the summarizer cannot see).
+  const prior = priorBrief?.trim()
+    ? `## Prior Brief (from the session this one continues)\n${priorBrief.trim()}\n\nCarry its Decisions Made, Dead Ends, Open Questions and Next Step forward. Correct anything the new session proved wrong rather than repeating it verbatim. Do not copy it wholesale.\n\n`
+    : ''
+  return `## Extracted Facts\n${factsBlock(facts)}\n\n${prior}## Conversation\n${renderTranscript(messages)}\n\n---\n\n${template.trim()}`
 }
 
 /** A reply that holds none of the template's sections is a dialogue fragment, not a brief. */
@@ -157,7 +199,7 @@ export function assembleBrief(ctx: BriefContext, facts: Facts, haiku: string | u
 - **Transcript:** \`${ctx.transcript}\`
 
 ## How to Use This Brief
-${haiku ? 'Haiku wrote the judgment sections from conversation text with tool output abbreviated. The facts sections came from tool calls in code.' : 'Haiku did not return a usable brief, so this holds only facts extracted in code. Read the transcript for the rest.'} Treat every line as a starting point, not a fact. Before acting on anything here, spawn a subagent to verify: run git status, gh pr view, or Read the file directly. If a fact is missing, grep the transcript before asking the user.`
+${haiku ? `${facts.briefAuthor && facts.briefAuthor !== 'haiku' ? `The session's own model (${facts.briefAuthor})` : 'Haiku'} wrote the judgment sections from conversation text with tool output abbreviated. The facts sections came from tool calls in code.` : 'The summary step did not return a usable brief, so this holds only facts extracted in code. Read the transcript for the rest.'} Treat every line as a starting point, not a fact. Before acting on anything here, spawn a subagent to verify: run git status, gh pr view, or Read the file directly. If a fact is missing, grep the transcript before asking the user.`
   // A valid Haiku brief already quotes the last request in its own section.
   return [header, haiku?.trim(), factsBlock(facts, !haiku)].filter(Boolean).join('\n\n')
 }

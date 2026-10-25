@@ -18,9 +18,34 @@ export const BRIEF_DIR = '.claude/state/auto-handoff'
 // that never count as edits.
 // viewer: where the mod serves the brief pages, "host:port"; "tailscale" as the host means this
 // machine's Tailscale IP, or 127.0.0.1 without Tailscale. Blank: no server, and the link is the local file.
-export type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
-export const DEFAULTS: Config = { threshold: 250_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
+export type Config = { threshold: number; maxUnattended: number; maxChainDepth: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
+export const DEFAULTS: Config = { threshold: 250_000, maxUnattended: 2, maxChainDepth: 3, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
 export const MIN_HEADROOM = 40_000
+
+// Per-model handoff lines. One number for every model was wrong in both directions: 250k is
+// 25% of a flat-priced 1M Claude window (needlessly early for Opus and Fable) while Haiku 5.5
+// already charges 5x for any prompt over 100k (250k is 2.5x too late). Matched by family so a
+// new point release inherits its family's line; an unknown model keeps the /config threshold.
+const MODEL_THRESHOLDS: readonly (readonly [RegExp, number, string])[] = [
+  // Haiku 5.5: 5x input, output and cache above 100k per request, so hand off before the tier.
+  [/haiku/, 95_000, 'Haiku'],
+  [/sonnet/, 275_000, 'Sonnet'],
+  // Opus 5.5: 1M window at standard pricing; 250k is only a quarter of it.
+  [/opus/, 500_000, 'Opus'],
+  // Fable 5.1: built for long-horizon agentic work, 1M flat, cache reads at 2.5%.
+  [/fable/, 650_000, 'Fable'],
+  // GPT-6 Astra / 6.1 Sol: above 272k the whole request bills at 2x input and cache.
+  [/astra|gpt-6/, 250_000, 'GPT-6 (2x tier above 272k)'],
+]
+
+/** The handoff line for a model id, or the configured threshold when the model is unknown. */
+export function modelThreshold(model: string | undefined, fallback: number): { base: number; source: string } {
+  const id = String(model ?? '').toLowerCase()
+  for (const [pattern, base, family] of MODEL_THRESHOLDS) {
+    if (pattern.test(id)) return { base, source: `${family} model rule` }
+  }
+  return { base: fallback, source: 'threshold in /config' }
+}
 // Each template's default, a file in the mod's templates/ folder.
 export const TEMPLATES = [['briefTemplate', 'brief.md'], ['instructionsTemplate', 'instructions.md']] as const
 export type TemplateKey = typeof TEMPLATES[number][0]
@@ -45,6 +70,7 @@ export function parseConfig(options: Record<string, unknown>): Config {
   return {
   threshold: num(options.threshold, DEFAULTS.threshold),
   maxUnattended: num(options.maxConsecutiveHandoffs, DEFAULTS.maxUnattended),
+  maxChainDepth: num(options.maxChainDepth, DEFAULTS.maxChainDepth),
   briefTemplate: str(options.briefTemplate, DEFAULTS.briefTemplate),
   instructionsTemplate: str(options.instructionsTemplate, DEFAULTS.instructionsTemplate),
   ignoreFiles: pattern(options.ignoreFiles),

@@ -21,6 +21,12 @@
       "description": "Handoffs allowed before you type a prompt. Past this the mod pauses until you send one.",
       "default": 2
     },
+    "maxChainDepth": {
+      "type": "number",
+      "title": "Chain depth before the session's own model writes the brief",
+      "description": "A chained handoff deeper than this is summarized by the session's own model instead of Haiku, and carries the previous brief forward. Keeps a long chain from compounding a cheap model's lossy re-derivation.",
+      "default": 3
+    },
     "briefTemplate": {
       "type": "string",
       "title": "Brief template file",
