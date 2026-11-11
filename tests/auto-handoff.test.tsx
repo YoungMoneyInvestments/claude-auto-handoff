@@ -57,7 +57,7 @@ const posix = (p: string) => p.replace(/^[A-Za-z]:/, '').replace(/\\/g, '/')
 const files = (written: Record<string, string>) => Object.keys(written).filter(p => !p.endsWith('/auto-handoff.log'))
 
 // The engine beneath the plugin: everything the mod calls, answered from memory.
-function engine(on: On, opts: { tokens: number; model?: string; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; noSh?: boolean }): Calls {
+function engine(on: On, opts: { tokens: number; model?: string; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; requests?: number[]; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; noSh?: boolean }): Calls {
   const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], models: [], toasts: [], ran: 0, renamed: [] }
   let sessionId = 'old-session'
   let clears = 0
@@ -136,9 +136,13 @@ function engine(on: On, opts: { tokens: number; model?: string; files?: Record<s
   // The real request: reached only when the mod lets the step through.
   on('turn.step', async function* (_$, e) {
     calls.steps++
+    // requests: each request's measured size, in order. The engine's context figure moves to it
+    // as the request goes out, so a tool call during its stream already reads it.
+    const sized = opts.requests?.shift()
+    if (sized !== undefined) calls.tokens = sized
     // stepUsage: the response reports the request's size, as the real engine does.
     const usage = opts.streamToolChars ? { input_tokens: 0, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } as never
-      : opts.stepUsage ? { input_tokens: 10, output_tokens: 0, cache_read_input_tokens: calls.tokens - 10, cache_creation_input_tokens: 0 } as never
+      : opts.stepUsage || sized !== undefined ? { input_tokens: 10, output_tokens: 0, cache_read_input_tokens: calls.tokens - 10, cache_creation_input_tokens: 0 } as never
       : null
     if (usage) yield { kind: 'text', index: 0, text: 'reading' }
     yield { kind: 'stop', stopReason: 'tool_use', usage }
@@ -490,6 +494,9 @@ describe('auto-handoff', () => {
     await $.turn.complete(TURN) // still ~31k: below floor + growth (a quarter of the threshold)
     await settle(() => false)
     expect(calls.cleared).toBe(1)
+    // The env var is a setting the warning names; the machine-startup notice is for model rules only.
+    expect(await band($)).toContain('(AUTO_HANDOFF_TOKENS) is below')
+    expect(await band($)).not.toContain("this machine's fresh sessions")
 
     calls.tokens = 90_000 // grew 59k past the floor
     await $.turn.complete(TURN)
@@ -507,7 +514,7 @@ describe('auto-handoff', () => {
     await settle(() => calls.seeded.length > 0)
 
     calls.tokens = 47_000 // the fresh session, brief and CLAUDE.md loaded
-    await step($, 0) // the seed turn's first request: this is the floor
+    await step($, 0) // the seed turn's first request: the floor so far
     expect(calls.steps).toBe(1)
     await $.tool.call({ tool: 'Read', file_path: '/big.txt' }) // ~225k of reads land in the same turn
     const chunks = await step($, 1)
@@ -1009,6 +1016,144 @@ describe('model-aware handoff line', () => {
     expect(calls.models).toEqual(['claude-opus-5-5'])
     expect(calls.prompts[0]).toContain('## Prior Brief (from the session this one continues)')
     expect(calls.prompts[0]).toContain('Decision: use zod.')
+  })
+})
+
+describe('settled starting size', () => {
+  // 2026-11-11, session fd5737a3 and the two before it: a seeded Haiku session measured 52,118 at
+  // its first request. The harness then sent its deferred listings (skills, deferred tool names,
+  // agents, MCP instructions: about 46k on that machine) with the brief's Read result, so the second
+  // request measured 98,340 with no work done. The floor came from the first request alone, so the
+  // line was max(95k, 52k + 40k) = 95k, the first Bash call was refused (100k ≥ 95k), and the session
+  // handed off. Every successor did the same until the loop guard paused the chain.
+  const DIR = '/home/test/.claude/state/auto-handoff'
+  type $T = Parameters<TestBody>[0]
+
+  // An unseeded Haiku session past its 95k line hands off; the test then runs in the seeded one.
+  async function seededHaiku($: $T, on: On, requests: number[]) {
+    const calls = engine(on, { tokens: 99_249, model: 'claude-haiku-5-5', requests, toolChars: 6_000 })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    return calls
+  }
+
+  // The seed turn as it ran live: request 1 asks for the brief; request 2 carries the listings and
+  // makes the session's first real tool call while it streams.
+  async function seedTurn($: $T) {
+    await step($, 0)
+    const read = await $.tool.call({ tool: 'Read', file_path: `${DIR}/old-session.md` })
+    const stream = $.turn.step({ ...STEP, index: 1 })[Symbol.asyncIterator]()
+    await stream.next() // request 2 is streaming; the engine already measures it
+    const work = await $.tool.call({ tool: 'Bash', command: 'git status' } as never)
+    while (!(await stream.next()).done) {}
+    return { read, work }
+  }
+
+  test('the listings in the second request are starting size: no handoff before real growth past it', async ($, on) => {
+    const calls = await seededHaiku($, on, [52_118, 98_340])
+    const { read, work } = await seedTurn($)
+    expect('deny' in read).toBe(false)
+    expect('deny' in work).toBe(false) // was: "the context is past the handoff threshold (100k ≥ 95k)"
+    expect(calls.steps).toBe(2)
+    await $.turn.complete(TURN)
+    await settle(() => false)
+    expect(calls.cleared).toBe(1)
+    expect(calls.written[`${DIR}/auto-handoff.log`]).toContain('floor settled session=new-session-1 tokens=98340')
+
+    // Real work: the line is 98,340 + 40k = 138,340, not Haiku's 95k and not 52k + 40k.
+    calls.tokens = 136_000
+    expect('deny' in await $.tool.call({ tool: 'Read', file_path: '/repo/a.ts' })).toBe(false)
+    await $.turn.complete(TURN)
+    await settle(() => false)
+    expect(calls.cleared).toBe(1)
+    calls.tokens = 139_000
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 1)
+    expect(calls.cleared).toBe(2)
+    // The brief carries the settled numbers and why the line moved.
+    expect(calls.prompts[1]).toContain("**This session's starting size (seeded from a handoff):** 98340 (98k)")
+    expect(calls.prompts[1]).toContain('from Haiku model rule (95k), raised to leave 40k above the starting size')
+  })
+
+  test('the panel names the Haiku line it moved, and the machine cause once per model', async ($, on) => {
+    const calls = await seededHaiku($, on, [52_118, 98_340, 52_118, 98_340])
+    await seedTurn($)
+    const moved = "threshold 95k (Haiku model rule) is below this session's 98k start: handing off at 138k instead"
+    const cause = "this machine's fresh sessions start at 98k, so Haiku runs above its 95k handoff line: reduce startup context or use a larger-window model"
+    const first = await band($)
+    expect(first).toContain(`⚠ ${moved}`)
+    expect(first).toContain(`⚠ ${cause}`)
+    await clock.advance(10_000)
+    expect(await band($)).toContain(cause) // stays up until dismissed
+
+    // The next session in the chain gets the moved line again, not the cause.
+    calls.tokens = 139_000
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 1)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 1)
+    const { work } = await seedTurn($)
+    expect('deny' in work).toBe(false)
+    const second = await band($)
+    expect(second).toContain(moved)
+    expect(second).not.toContain(cause)
+    const log = calls.written[`${DIR}/auto-handoff.log`] ?? ''
+    expect(log.split('tight threshold').length - 1).toBe(2)
+    expect(log.split('startup context at model line').length - 1).toBe(1)
+  })
+
+  test('a seed turn whose second request only answers settles there, and the next prompt can work', async ($, on) => {
+    // 1db17a48: the second request answered "Brief read." and ended the turn at 98,346; the turn end
+    // handed off. With the guard paused the person typed "sure", and the first Bash call was refused.
+    const calls = await seededHaiku($, on, [52_086, 98_346, 99_061])
+    await step($, 0)
+    await $.tool.call({ tool: 'Read', file_path: `${DIR}/old-session.md` })
+    await step($, 1)
+    await $.turn.complete(TURN)
+    await settle(() => false)
+    expect(calls.cleared).toBe(1)
+    await $.prompt.submit({ text: 'sure', origin: { kind: 'composer' } } as never)
+    const stream = $.turn.step({ ...STEP, index: 0 })[Symbol.asyncIterator]()
+    await stream.next()
+    const work = await $.tool.call({ tool: 'Bash', command: 'git fetch' } as never)
+    while (!(await stream.next()).done) {}
+    expect('deny' in work).toBe(false)
+    await $.turn.complete(TURN)
+    await settle(() => false)
+    expect(calls.cleared).toBe(1)
+  })
+
+  test('when the seed turn makes one request, the floor settles on the next prompt\'s request', async ($, on) => {
+    // No brief read: the listings ride in with the person's next prompt instead.
+    const calls = await seededHaiku($, on, [52_118, 98_340])
+    await step($, 0)
+    await $.turn.complete(TURN)
+    await $.prompt.submit({ text: 'go on', origin: { kind: 'composer' } } as never)
+    const stream = $.turn.step({ ...STEP, index: 0 })[Symbol.asyncIterator]()
+    await stream.next()
+    const work = await $.tool.call({ tool: 'Bash', command: 'git status' } as never)
+    while (!(await stream.next()).done) {}
+    expect('deny' in work).toBe(false)
+    await $.turn.complete(TURN)
+    await settle(() => false)
+    expect(calls.cleared).toBe(1)
+    expect(calls.written[`${DIR}/auto-handoff.log`]).toContain('floor settled session=new-session-1 tokens=98340')
+  })
+
+  test('an unseeded session at a low threshold still hands off as before', async ($, on) => {
+    const calls = engine(on, { tokens: 30_000, env: { AUTO_HANDOFF_TOKENS: '60000' }, requests: [30_000, 61_000] })
+    await step($, 0)
+    await $.tool.call({ tool: 'Read', file_path: '/repo/a.ts' })
+    const stream = $.turn.step({ ...STEP, index: 1 })[Symbol.asyncIterator]()
+    await stream.next() // 61k: an unseeded session has no floor, so its second request is not absorbed
+    const refused = await $.tool.call({ tool: 'Read', file_path: '/repo/b.ts' })
+    while (!(await stream.next()).done) {}
+    expect('deny' in refused && refused.deny?.includes('(61k ≥ 60k)')).toBe(true)
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
   })
 })
 
