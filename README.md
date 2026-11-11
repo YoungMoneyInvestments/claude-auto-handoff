@@ -106,6 +106,7 @@ The mod hot-reloads when you save while it's loaded with `--plugin-dir`.
 
 ## Changelog
 
+- **0.8.7** The fresh session gets a title that names the work (`↪ Fixing the parser refactor`), set with `/rename` right after `/clear`. Before, a session list that titles from the first prompt, such as the Claude desktop app's Code sidebar after it imports terminal sessions, showed every continuation as `/clear clear`. The title comes from the brief's Work in Progress line, else the chain's earlier title, else the first request.
 - **0.8.6** On a machine without `sh` (Windows), the brief page is still written, and the link opens it as a local file instead of a server that never started. The viewer no longer shells out to `mkdir`.
 - **0.8.5** Windows support, from [@davidboomcycle](https://github.com/davidboomcycle) (#3). The mod falls back to `USERPROFILE` when `HOME` is unset, so briefs no longer land in `<project>/undefined/`. Where there is no `sh`, the log is written through `$.fs`. The tests pass on Windows. The viewer server still needs a POSIX shell.
 - **0.8.4** Any token figure in Haiku's brief that isn't in Handoff Numbers is marked `[unverified: not in Handoff Numbers]` and logged. The figure is marked, not removed, and only its first occurrence in the brief carries the mark.

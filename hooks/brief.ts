@@ -55,6 +55,54 @@ function commitSubject(command: string): string | undefined {
   return command.match(/-m\s+(["'])(.+?)\1/)?.[2]
 }
 
+// The fresh session's title in a session list. /clear starts a new transcript whose first row is
+// the /clear command itself, and a list that titles a session from its first prompt (the Claude
+// desktop app's Code sidebar) shows every continuation as "/clear clear". The title names the
+// work instead: what the brief says was in progress, else the title the chain already carries,
+// else the first thing the user asked for.
+const TITLE_CHARS = 60
+function titleFrom(text: string | undefined): string | undefined {
+  // The first line with words in it, without markdown marks, links or a list bullet.
+  const line = (text ?? '').split('\n').map(l => l
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[*_`#>]/g, '')
+    .replace(/^\s*(?:[-+•]|\d+[.)])\s+/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    // A summary's narration is not the work: "The user is drafting X" is titled "Drafting X".
+    .replace(/^(?:currently,?\s+)?(?:the (?:user|session|assistant)|we|i|claude) (?:is|was|are|were|am|had been|has been) (?:currently |actively )?(?=\p{L})/iu, '')
+    .replace(/^\p{Ll}/u, c => c.toUpperCase())).find(l => /[\p{L}\p{N}]{2}/u.test(l))
+  if (!line) return undefined
+  // One sentence is a title; the rest of the paragraph is not.
+  const sentence = line.match(/^.{12,}?[.!?](?=\s|$)/)?.[0].replace(/[.!?]$/, '') ?? line
+  if (sentence.length <= TITLE_CHARS) return sentence
+  const cut = sentence.slice(0, TITLE_CHARS)
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(' '), TITLE_CHARS / 2)).replace(/[\s,;:–-]+$/, '')}…`
+}
+
+function section(brief: string, heading: RegExp): string | undefined {
+  const at = heading.exec(brief)
+  if (!at) return undefined
+  const rest = brief.slice(at.index + at[0].length)
+  const next = /^#{1,6}\s/m.exec(rest)
+  return next ? rest.slice(0, next.index) : rest
+}
+
+/** summary: the model's judgment sections, when usable. carried: the title this chain already has. */
+export function handoffTitle(summary: string | undefined, messages: readonly SessionMessage[], carried?: string): string | undefined {
+  const wip = summary ? titleFrom(section(summary, /^##\s*Work in Progress\s*$/im)) : undefined
+  // "None." or "No active work" names nothing.
+  if (wip && !/^(no|none|nothing|n\/a|unknown|unclear|not applicable)\b/i.test(wip)) return wip
+  if (carried?.trim()) return carried.trim()
+  for (const m of messages) {
+    const said = titleFrom(userText(m))
+    if (said) return said
+  }
+  return undefined
+}
+
 /** ignoreFiles: paths that never count as edits (auto-synced state, caches); the ignoreFiles setting. */
 export function extractFacts(messages: readonly SessionMessage[], ignoreFiles?: RegExp): Facts {
   const files = new Set<string>()

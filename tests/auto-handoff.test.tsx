@@ -1,12 +1,12 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import type { On, SessionMessage } from 'claude-code'
-import { briefPrompt, extractErrors, extractFacts, factsBlock, hasUnansweredLastRequest, isValidBrief, markUnverifiedFigures, renderTranscript } from '../hooks/brief.ts'
+import { briefPrompt, extractErrors, extractFacts, factsBlock, handoffTitle, hasUnansweredLastRequest, isValidBrief, markUnverifiedFigures, renderTranscript } from '../hooks/brief.ts'
 import { modelThreshold } from '../hooks/config.ts'
 import { renderTemplate } from '../hooks/templates.ts'
 import { parseBrief } from '../hooks/viewer.ts'
 
-type Calls = { compacts: number; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; models: string[]; toasts: string[]; ran: number }
+type Calls = { compacts: number; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; models: string[]; toasts: string[]; ran: number; renamed: string[] }
 
 // The test runs sandboxed, with no file access, so these stand in for the files in templates/:
 // the same headings and switches, shorter prose.
@@ -58,7 +58,7 @@ const files = (written: Record<string, string>) => Object.keys(written).filter(p
 
 // The engine beneath the plugin: everything the mod calls, answered from memory.
 function engine(on: On, opts: { tokens: number; model?: string; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; noSh?: boolean }): Calls {
-  const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], models: [], toasts: [], ran: 0 }
+  const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], models: [], toasts: [], ran: 0, renamed: [] }
   let sessionId = 'old-session'
   let clears = 0
   mock.env(on, { HOME: '/home/test', ...(opts.env ?? {}) })
@@ -118,7 +118,8 @@ function engine(on: On, opts: { tokens: number; model?: string; files?: Record<s
     calls.toasts.push(e.text)
     return { value: undefined }
   })
-  on('command.run', async () => {
+  on('command.run', async (_$, e) => {
+    if (e.command === 'rename') return (calls.renamed.push(e.args), {})
     calls.cleared++
     sessionId = `new-session-${++clears}`
     return {}
@@ -210,6 +211,31 @@ describe('auto-handoff', () => {
     expect(calls.seeded[0]).toContain('Read the brief at /home/test/.claude/state/auto-handoff/old-session.md')
     expect(calls.seeded[0]).not.toContain('Finish the parser refactor')
     expect(calls.seeded[0]?.split('\n').length).toBe(1)
+  })
+
+  test('the fresh session is titled after the work, not after /clear', async ($, on) => {
+    const calls = engine(on, { tokens: 255_000, brief: '## Work in Progress\n- **Fixing** the `parser` refactor in [lexer](http://x/y). More detail follows here.\n\n## Next Step\nRun the tests.' })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    const started = await $.classic.SessionStart({ source: 'clear' })
+    expect(started.sessionTitle).toBe('↪ Fixing the parser refactor in lexer')
+    await settle(() => calls.renamed.length > 0)
+    expect(calls.renamed).toEqual(['↪ Fixing the parser refactor in lexer'])
+    // The user's own /clear, with no handoff pending, is left for the host to title.
+    expect((await $.classic.SessionStart({ source: 'clear' })).sessionTitle).toBe(undefined)
+  })
+
+  test('handoffTitle: the work in progress, else the chain title, else the first request, cut at a word', async () => {
+    const said = [msg('user', '<command-name>/clear</command-name>'), msg('user', 'Please fix the arena board so that every seat shows its evaluated decision count on the public page'), msg('user', 'later request')]
+    expect(handoffTitle('## Work in Progress\nPorting the arena view.\n## Next Step\nx', said, 'Chain title')).toBe('Porting the arena view')
+    expect(handoffTitle(undefined, said, 'Chain title')).toBe('Chain title')
+    expect(handoffTitle('## Work in Progress\nNo active work.\n', said, 'Chain title')).toBe('Chain title')
+    expect(handoffTitle('## Work in Progress\nUnknown. The reply says it is ready.\n', said, 'Chain title')).toBe('Chain title')
+    expect(handoffTitle('## Work in Progress\nThe user is drafting a short explainer on lenses.\n', said)).toBe('Drafting a short explainer on lenses')
+    const cut = handoffTitle(undefined, said)!
+    expect(cut).toBe('Please fix the arena board so that every seat shows its…')
+    expect(cut.length <= 61).toBe(true)
+    expect(handoffTitle(undefined, [msg('user', '[auto-handoff] ↪ Handoff from session abc')])).toBe(undefined)
   })
 
   test('fires once per session', async ($, on) => {

@@ -1,5 +1,5 @@
 import type { EngineInterface, Register, SessionMessage, Timer } from 'claude-code'
-import { assembleBrief, briefPrompt, extractFacts, isValidBrief, markUnverifiedFigures } from './brief.ts'
+import { assembleBrief, briefPrompt, extractFacts, handoffTitle, isValidBrief, markUnverifiedFigures } from './brief.ts'
 import { chainOf, parseBrief, renderPage, viewerLink, withHeader } from './viewer.ts'
 import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
@@ -20,9 +20,12 @@ const CHARS_PER_TOKEN = 4
 // The panel above the prompt (panel.tsx) is the whole UI. No status entry: the host draws one
 // as "⚠ auto-handoff:", which reads as an error.
 const LOG = `~/${BRIEF_DIR}/auto-handoff.log`
+// Leads a continuation's title, as it leads the seed row.
+const TITLE_MARK = '↪'
 
 // problem: why the brief is facts only, when Haiku's summary was unusable.
-type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; problem?: string }
+// title: what the fresh session is called in a session list (see handoffTitle).
+type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; title: string; problem?: string }
 
 
 
@@ -38,7 +41,7 @@ let handedFrom: { session: string; tokens: number; link: string; problem?: strin
 // The seeded session's place in its chain of handoffs, for its own brief's header. Also kept in
 // the store as lineage:<session>, because a hot reload resets module variables: a session seeded
 // before a reload would otherwise start a new chain when it hands off.
-type Lineage = { from: string; chain: string; depth?: number }
+type Lineage = { from: string; chain: string; depth?: number; title?: string }
 let lineage: Lineage | undefined
 // Tokens added since the last response measured the context: tool results and the
 // response's own output. turn.complete alone missed a turn whose reads jumped from 63k
@@ -188,7 +191,7 @@ async function viewer($: EngineInterface, briefDir: string, pagesDir: string, se
 async function storedLineage($: EngineInterface, sessionId: string): Promise<Lineage | undefined> {
   try {
     const v = await $.store.get(`lineage:${sessionId}`) as Partial<Lineage> | undefined
-    return typeof v?.from === 'string' && typeof v.chain === 'string' ? { from: v.from, chain: v.chain, depth: typeof v.depth === 'number' ? v.depth : undefined } : undefined
+    return typeof v?.from === 'string' && typeof v.chain === 'string' ? { from: v.from, chain: v.chain, depth: typeof v.depth === 'number' ? v.depth : undefined, title: typeof v.title === 'string' ? v.title : undefined } : undefined
   } catch {
     return undefined
   }
@@ -271,10 +274,12 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     const header = { from: own?.from, chain, depth: depth !== undefined ? String(depth) : undefined, tokens: String(tokens), at: new Date().toISOString(), cwd }
     await $.fs.write(briefPath, withHeader(header, brief))
     const link = await viewer($, briefDir, pagesDir, sessionId)
-    pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
+    // A chain keeps its title when the summary failed; with nothing to go on, the folder names the work.
+    const title = `${TITLE_MARK} ${handoffTitle(problem ? undefined : checked.text, messages, own?.title) ?? `${cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'session'} (continued)`}`
+    pending = { oldSession: sessionId, briefPath, tokens, chain, link, title, problem }
     steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
     await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
-    await log($, `brief written ${briefPath} (${brief.length} chars, author=${author} depth=${depth}); queueing /clear`)
+    await log($, `brief written ${briefPath} (${brief.length} chars, author=${author} depth=${depth} title=${JSON.stringify(title)}); queueing /clear`)
     $.command.run({ command: 'clear' }).catch(async (err: unknown) => {
       pending = undefined
       // fired stays 'clearing', so this session does not try again; it carries on as it is.
@@ -630,7 +635,7 @@ export const register: Register = (on, options) => {
       steps($, [briefStep(p.problem), { mark: 'done', text: 'cleared' }, { mark: 'spin', text: 'starting the fresh session' }])
       const own = await storedLineage($, p.oldSession)
       const prior = own ? own.depth : 1
-      lineage = { from: p.oldSession, chain: p.chain, depth: prior !== undefined ? prior + 1 : undefined }
+      lineage = { from: p.oldSession, chain: p.chain, depth: prior !== undefined ? prior + 1 : undefined, title: p.title.slice(TITLE_MARK.length + 1) }
       await $.store.set(`lineage:${newSession}`, lineage)
       // The old brief learns where it went, and its chain's pages link forward.
       try {
@@ -645,6 +650,9 @@ export const register: Register = (on, options) => {
       // One line on screen; the model reads the brief from disk. A full brief as the
       // seed showed up as a wall of text the person never wrote.
       const text = `${SEED_PREFIX} ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
+      // /rename writes the title into the new transcript, where a session list reads it. Queued
+      // ahead of the seed and never awaited: a refused rename must not hold the seed back.
+      $.command.run({ command: 'rename', args: p.title }).catch((err: unknown) => log($, `rename rejected ${String(err)}`))
       $.prompt.submit({ text }).catch((err: unknown) => {
         handedFrom = undefined
         failed($, 'the seed prompt was rejected', `paste the brief path to carry on: ${p.briefPath}`)
@@ -653,6 +661,8 @@ export const register: Register = (on, options) => {
     } catch (err) {
       await log($, `seed error ${String(err)}`)
     }
-    return r
+    // The engine records this as the session's title, ahead of the "/clear" row a session list
+    // would otherwise name the fresh session after.
+    return { ...r, sessionTitle: p.title }
   })
 }
