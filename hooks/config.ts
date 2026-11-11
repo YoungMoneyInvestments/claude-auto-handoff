@@ -5,9 +5,10 @@ export const BRIEF_DIR = '.claude/state/auto-handoff'
 // The two numbers are userConfig fields (plugin.json), set in /config. Defaults match the manifest.
 // threshold: matches HANDOFF_ARM_TOKENS in context-warning.ts.
 // MIN_HEADROOM and maxUnattended are loop guards. A seeded session must grow MIN_HEADROOM past its
-// first-turn size (its floor) before it can hand off again, and at most maxUnattended handoffs may
-// run before the user types a prompt. MIN_HEADROOM is fixed: seeded sessions start near 45k, so at
-// the default threshold it never moves the line; it only matters when the threshold is set low.
+// settled starting size (its floor, see BASELINE_REQUESTS) before it can hand off again, and at
+// most maxUnattended handoffs may run before the user types a prompt. MIN_HEADROOM is fixed: on a
+// lean setup seeded sessions start near 45k, so at the default threshold it never moves the line;
+// it matters when the threshold is set low or startup context is large.
 // 40k is the empirical line where a seeded session can read its brief and still do real work. The
 // 2026-10-03 live run (threshold 20k, seeded sessions start at ~31k) chained six times with no
 // guard; the 2026-10-04 run (AUTO_HANDOFF_TOKENS=80000 left in a shell, floor ~45k) chained eight
@@ -21,6 +22,17 @@ export const BRIEF_DIR = '.claude/state/auto-handoff'
 export type Config = { threshold: number; maxUnattended: number; maxChainDepth: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
 export const DEFAULTS: Config = { threshold: 250_000, maxUnattended: 2, maxChainDepth: 3, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
 export const MIN_HEADROOM = 40_000
+// A seeded session's floor is the largest context measured over its first BASELINE_REQUESTS
+// requests, not its first alone. Claude Code sends the skill listing, deferred tool names, agent
+// list and MCP instructions with the first tool result rather than the first request. On
+// 2026-11-11 a seeded Haiku session measured 52,118 at its first request and 98,340 at its second
+// with no work done. A 52k floor put the line at max(95k, 52k + 40k) = 95k, below where the session
+// actually rested, so every seeded session refused its first real tool call and handed off again
+// until the loop guard paused the chain.
+export const BASELINE_REQUESTS = 2
+// When the settled starting size alone comes within NEAR_LINE of a model rule's line, that model
+// always runs past its line on this machine, and no setting moves the line: the panel says so once.
+export const NEAR_LINE = 10_000
 
 // Per-model handoff lines. One number for every model was wrong in both directions: 250k is
 // 25% of a flat-priced 1M Claude window (needlessly early for Opus and Fable) while Haiku 5.5
@@ -39,14 +51,17 @@ const MODEL_THRESHOLDS: readonly (readonly [RegExp, number, string])[] = [
   [/astra|gpt-6/, 260_000, 'GPT-6 (2x tier above 272k)'],
 ]
 
+const MODEL_RULE = ' model rule'
 /** The handoff line for a model id, or the configured threshold when the model is unknown. */
 export function modelThreshold(model: string | undefined, fallback: number): { base: number; source: string } {
   const id = String(model ?? '').toLowerCase()
   for (const [pattern, base, family] of MODEL_THRESHOLDS) {
-    if (pattern.test(id)) return { base, source: `${family} model rule` }
+    if (pattern.test(id)) return { base, source: `${family}${MODEL_RULE}` }
   }
   return { base: fallback, source: 'threshold in /config' }
 }
+/** The model family when a threshold's source is a model rule, else undefined. */
+export const modelRuleFamily = (source: string) => source.endsWith(MODEL_RULE) ? source.slice(0, -MODEL_RULE.length) : undefined
 // Each template's default, a file in the mod's templates/ folder.
 export const TEMPLATES = [['briefTemplate', 'brief.md'], ['instructionsTemplate', 'instructions.md']] as const
 export type TemplateKey = typeof TEMPLATES[number][0]

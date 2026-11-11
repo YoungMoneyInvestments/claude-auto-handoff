@@ -5,7 +5,7 @@ import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
 import { isSpinning, panelTree } from './panel.tsx'
 import type { Line, Panel } from './panel.tsx'
-import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, expand, k, linkify, modelThreshold, parseConfig, short } from './config.ts'
+import { BASELINE_REQUESTS, BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, NEAR_LINE, SEED_PREFIX, TEMPLATES, expand, k, linkify, modelRuleFamily, modelThreshold, parseConfig, short } from './config.ts'
 import type { Config, TemplateKey } from './config.ts'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
@@ -33,7 +33,11 @@ type Pending = { oldSession: string; briefPath: string; tokens: number; chain: s
 let pending: Pending | undefined
 let inFlight = false
 let seededSession: string | undefined
+// The seeded session's starting size: the largest context measured over its first
+// BASELINE_REQUESTS requests. Provisional until `settled`; baselineRequests counts those requests.
 let floor: number | undefined
+let baselineRequests = 0
+let settled = false
 let unattended = 0 // handoffs since the user last typed a prompt
 let pausedSession: string | undefined
 // The handoff the fresh session came from, until its first request is measured and shown on the panel.
@@ -421,12 +425,17 @@ function failed($: EngineInterface, what: string, next: string) {
 
 // The fresh session's first measurement: the panel's last step, which says the handoff worked.
 // It collapses on its own unless the brief was facts only.
+// The first request runs low (see BASELINE_REQUESTS), so once the floor settles the header is
+// redrawn with the settled size; handedOffTokens keeps the old session's figure until then.
+const HANDED_OFF = 'handed off ·'
+let handedOffTokens: number | undefined
 function showHandedOff($: EngineInterface, fresh: number) {
   if (!handedFrom) return
   const { tokens, link, problem } = handedFrom
-  showPanel($, { header: { mark: 'done', text: `handed off · ${k(tokens)} → ${k(fresh)}` }, steps: problem ? [briefStep(problem)] : [], link: link || undefined, sticky: !!problem },
-    `↪ handed off · ${k(tokens)} → ${k(fresh)}${problem ? ' · the brief is facts only' : ''}`)
+  showPanel($, { header: { mark: 'done', text: `${HANDED_OFF} ${k(tokens)} → ${k(fresh)}` }, steps: problem ? [briefStep(problem)] : [], link: link || undefined, sticky: !!problem },
+    `↪ ${HANDED_OFF} ${k(tokens)} → ${k(fresh)}${problem ? ' · the brief is facts only' : ''}`)
   handedFrom = undefined
+  handedOffTokens = tokens
 }
 
 // The configured threshold and where it came from. The env var wins so a test run needs no
@@ -454,7 +463,11 @@ async function thresholdFor($: EngineInterface, sessionId: string): Promise<numb
 // Once per seeded session, as its floor lands: when the configured threshold leaves less than
 // MIN_HEADROOM above the floor, say so, with the number, the source, and where the line moved to.
 // Without this the 2026-10-04 chain looked like a guard bug; nobody had run `env | grep AUTO_HANDOFF`.
+// A model rule's line is not a setting, so when the starting size alone reaches it the cause is
+// this machine's startup context. Named once per model family while the mod is loaded, not on
+// every handoff of a chain.
 let warnedSession: string | undefined
+const noticedFamilies = new Set<string>()
 async function warnTightThreshold($: EngineInterface, sessionId: string) {
   if (floor === undefined || warnedSession === sessionId) return
   warnedSession = sessionId
@@ -462,8 +475,30 @@ async function warnTightThreshold($: EngineInterface, sessionId: string) {
   const headroom = base - floor
   if (headroom >= MIN_HEADROOM) return
   await log($, `tight threshold session=${sessionId} threshold=${base} source=${source} floor=${floor} headroom=${headroom} effective=${floor + MIN_HEADROOM}`)
-  const left = headroom > 0 ? `leaves ${k(headroom)}` : 'is below'
-  addStep($, { mark: 'warn', text: `threshold ${k(base)} (${source}) ${left} this session's ${k(floor)} start: handing off at ${k(floor + MIN_HEADROOM)} instead` }, { mark: 'warn', text: 'auto-handoff' }, true)
+  const left = headroom > 0 ? `leaves only ${k(headroom)} above` : 'is below'
+  const header: Line = { mark: 'warn', text: 'auto-handoff' }
+  addStep($, { mark: 'warn', text: `threshold ${k(base)} (${source}) ${left} this session's ${k(floor)} start: handing off at ${k(floor + MIN_HEADROOM)} instead` }, header, true)
+  const family = modelRuleFamily(source)
+  if (!family || headroom > NEAR_LINE || noticedFamilies.has(family)) return
+  noticedFamilies.add(family)
+  await log($, `startup context at model line session=${sessionId} model=${family} start=${floor} line=${base}`)
+  addStep($, { mark: 'warn', text: `this machine's fresh sessions start at ${k(floor)}, so ${family} runs above its ${k(base)} handoff line: reduce startup context or use a larger-window model` }, header, true)
+}
+
+// Folds one measurement of the seeded session's context into its floor while the floor settles.
+function foldFloor(tokens: number) {
+  floor = Math.max(floor ?? 0, tokens)
+}
+
+// The floor is final: log it, and report a line it moved.
+async function settleFloor($: EngineInterface, sessionId: string, how: string) {
+  settled = true
+  await log($, `floor settled session=${sessionId} tokens=${floor} (${how})`)
+  if (shown && floor !== undefined && handedOffTokens !== undefined && shown.header.text.startsWith(HANDED_OFF)) {
+    showPanel($, { ...shown, header: { ...shown.header, text: `${HANDED_OFF} ${k(handedOffTokens)} → ${k(floor)}` } })
+  }
+  handedOffTokens = undefined
+  await warnTightThreshold($, sessionId)
 }
 
 
@@ -477,13 +512,14 @@ export const register: Register = (on, options) => {
       const tokens = (await $.session.usage()).context.tokens
       if (tokens === undefined) return r
       const sessionId = await $.session.id()
-      if (sessionId === seededSession && floor === undefined) {
-        // Fallback only: turn.step sets the floor from the seed turn's first response. Reached
-        // when that response carried no usage.
-        floor = tokens
-        await log($, `floor set at turn end session=${sessionId} tokens=${tokens} (first response carried no usage)`)
+      if (sessionId === seededSession && !settled && (baselineRequests === 0 || floor === undefined)) {
+        // Fallback only: turn.step measures the floor from each request's response. Reached when
+        // no request went through turn.step, or none carried usage. With no request counted, the
+        // turn's end is the only measurement there is, so it settles the floor.
+        foldFloor(tokens)
+        await log($, `floor set at turn end session=${sessionId} tokens=${tokens} (no response carried usage)`)
         showHandedOff($, tokens)
-        await warnTightThreshold($, sessionId)
+        if (baselineRequests === 0 || baselineRequests >= BASELINE_REQUESTS) await settleFloor($, sessionId, 'turn end')
         return r
       }
       const threshold = await thresholdFor($, sessionId)
@@ -504,6 +540,10 @@ export const register: Register = (on, options) => {
       try {
         const sessionId = await $.session.id()
         const tokens = (await $.session.usage()).context.tokens
+        // The request in flight is part of a settling floor: its tool calls run before its
+        // response ends, so turn.step has not counted it yet. Seen live: the second request
+        // measured 98k here while the floor still read the first request's 52k, and the call was refused.
+        if (tokens !== undefined && sessionId === seededSession && !settled && baselineRequests < BASELINE_REQUESTS) foldFloor(tokens)
         const projected = (tokens ?? 0) + unmeasured
         const threshold = await thresholdFor($, sessionId)
         if (inFlight || pending || (tokens !== undefined && projected >= threshold && await canHandOff($, sessionId))) {
@@ -524,10 +564,11 @@ export const register: Register = (on, options) => {
   // crosses the threshold, end the turn here and hand off instead of sending a request
   // that may overflow the window.
   on('turn.step', async function* ($, e, next) {
+    let sessionId: string | undefined
     if (!e.agentId && !inFlight && !pending && e.index > 0) {
       try {
         const tokens = (await $.session.usage()).context.tokens
-        const sessionId = await $.session.id()
+        sessionId = await $.session.id()
         const isSeedTurn = sessionId === seededSession && floor === undefined
         if (tokens !== undefined && !isSeedTurn) {
           const projected = tokens + unmeasured
@@ -549,19 +590,31 @@ export const register: Register = (on, options) => {
       }
     }
     const before = unmeasured
-    const seeding = !e.agentId && seededSession !== undefined && floor === undefined
+    let settling = false
+    if (!e.agentId && seededSession !== undefined && !settled) {
+      try {
+        settling = (sessionId ?? await $.session.id()) === seededSession
+      } catch (err) {
+        await log($, `turn.step session error ${String(err)}`)
+      }
+    }
     const r = yield* next(e)
     // The response measured everything up to its request; its own output is new, and so is
     // any tool output that landed while it streamed (core runs tools before the stream ends).
     if (!e.agentId && r.usage) unmeasured = unmeasured - before + r.usage.output_tokens
-    // The seed turn's first request is the fresh session's true starting size. Measuring at
-    // the end of that turn instead let a busy first turn (47k to 129k of reads) set
-    // the floor at 129k, with the pre-request check off the whole way.
-    if (seeding && r.usage) {
-      floor = r.usage.input_tokens + r.usage.cache_read_input_tokens + r.usage.cache_creation_input_tokens
-      await log($, `floor session=${seededSession} tokens=${floor} (seed turn's first request)`)
-      showHandedOff($, floor)
-      await warnTightThreshold($, seededSession!)
+    // The floor is the largest of the seeded session's first BASELINE_REQUESTS requests, each
+    // measured as its response ends. Not the end of the seed turn: a busy first turn (47k to 129k
+    // of reads) set the floor at 129k, with the pre-request check off the whole way. Not the first
+    // request alone: the harness's deferred listings arrive with the second (see BASELINE_REQUESTS).
+    if (settling) {
+      baselineRequests++
+      if (r.usage) {
+        const size = r.usage.input_tokens + r.usage.cache_read_input_tokens + r.usage.cache_creation_input_tokens
+        foldFloor(size)
+        await log($, `floor session=${seededSession} request=${baselineRequests} tokens=${size} floor=${floor}`)
+        showHandedOff($, size)
+      }
+      if (baselineRequests >= BASELINE_REQUESTS && floor !== undefined) await settleFloor($, seededSession!, `largest of the first ${BASELINE_REQUESTS} requests`)
     }
     return r
   })
@@ -628,6 +681,9 @@ export const register: Register = (on, options) => {
       const newSession = await $.session.id()
       seededSession = newSession
       floor = undefined
+      baselineRequests = 0
+      settled = false
+      handedOffTokens = undefined
       unmeasured = 0
       await $.store.set(`fired:${p.oldSession}`, `seeded:${newSession}`)
       await log($, `seeding new=${newSession} from=${p.oldSession}`)
