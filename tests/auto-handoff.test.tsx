@@ -580,7 +580,7 @@ describe('auto-handoff', () => {
     await settle(() => calls.seeded.length > 0)
     calls.tokens = 45_000
     await $.turn.complete(TURN) // seed turn sets the floor: 35k of headroom, under the 40k minimum
-    const warning = "threshold 80k (AUTO_HANDOFF_TOKENS) leaves 35k this session's 45k start: handing off at 85k instead"
+    const warning = "threshold 80k (AUTO_HANDOFF_TOKENS) leaves only 35k above this session's 45k start: handing off at 85k instead"
     expect(await band($)).toContain(`⚠ ${warning}`)
     calls.tokens = 81_000 // past 80k; the old math handed off here
     await $.turn.complete(TURN)
@@ -1083,6 +1083,7 @@ describe('settled starting size', () => {
     const moved = "threshold 95k (Haiku model rule) is below this session's 98k start: handing off at 138k instead"
     const cause = "this machine's fresh sessions start at 98k, so Haiku runs above its 95k handoff line: reduce startup context or use a larger-window model"
     const first = await band($)
+    expect(first).toContain('✓ handed off · 99k → 98k') // the settled start, not the first request's 52k
     expect(first).toContain(`⚠ ${moved}`)
     expect(first).toContain(`⚠ ${cause}`)
     await clock.advance(10_000)

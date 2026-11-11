@@ -425,12 +425,17 @@ function failed($: EngineInterface, what: string, next: string) {
 
 // The fresh session's first measurement: the panel's last step, which says the handoff worked.
 // It collapses on its own unless the brief was facts only.
+// The first request runs low (see BASELINE_REQUESTS), so once the floor settles the header is
+// redrawn with the settled size; handedOffTokens keeps the old session's figure until then.
+const HANDED_OFF = 'handed off ·'
+let handedOffTokens: number | undefined
 function showHandedOff($: EngineInterface, fresh: number) {
   if (!handedFrom) return
   const { tokens, link, problem } = handedFrom
-  showPanel($, { header: { mark: 'done', text: `handed off · ${k(tokens)} → ${k(fresh)}` }, steps: problem ? [briefStep(problem)] : [], link: link || undefined, sticky: !!problem },
-    `↪ handed off · ${k(tokens)} → ${k(fresh)}${problem ? ' · the brief is facts only' : ''}`)
+  showPanel($, { header: { mark: 'done', text: `${HANDED_OFF} ${k(tokens)} → ${k(fresh)}` }, steps: problem ? [briefStep(problem)] : [], link: link || undefined, sticky: !!problem },
+    `↪ ${HANDED_OFF} ${k(tokens)} → ${k(fresh)}${problem ? ' · the brief is facts only' : ''}`)
   handedFrom = undefined
+  handedOffTokens = tokens
 }
 
 // The configured threshold and where it came from. The env var wins so a test run needs no
@@ -470,7 +475,7 @@ async function warnTightThreshold($: EngineInterface, sessionId: string) {
   const headroom = base - floor
   if (headroom >= MIN_HEADROOM) return
   await log($, `tight threshold session=${sessionId} threshold=${base} source=${source} floor=${floor} headroom=${headroom} effective=${floor + MIN_HEADROOM}`)
-  const left = headroom > 0 ? `leaves ${k(headroom)}` : 'is below'
+  const left = headroom > 0 ? `leaves only ${k(headroom)} above` : 'is below'
   const header: Line = { mark: 'warn', text: 'auto-handoff' }
   addStep($, { mark: 'warn', text: `threshold ${k(base)} (${source}) ${left} this session's ${k(floor)} start: handing off at ${k(floor + MIN_HEADROOM)} instead` }, header, true)
   const family = modelRuleFamily(source)
@@ -489,6 +494,10 @@ function foldFloor(tokens: number) {
 async function settleFloor($: EngineInterface, sessionId: string, how: string) {
   settled = true
   await log($, `floor settled session=${sessionId} tokens=${floor} (${how})`)
+  if (shown && floor !== undefined && handedOffTokens !== undefined && shown.header.text.startsWith(HANDED_OFF)) {
+    showPanel($, { ...shown, header: { ...shown.header, text: `${HANDED_OFF} ${k(handedOffTokens)} → ${k(floor)}` } })
+  }
+  handedOffTokens = undefined
   await warnTightThreshold($, sessionId)
 }
 
@@ -674,6 +683,7 @@ export const register: Register = (on, options) => {
       floor = undefined
       baselineRequests = 0
       settled = false
+      handedOffTokens = undefined
       unmeasured = 0
       await $.store.set(`fired:${p.oldSession}`, `seeded:${newSession}`)
       await log($, `seeding new=${newSession} from=${p.oldSession}`)
